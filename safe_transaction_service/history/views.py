@@ -293,6 +293,43 @@ class AllTransactionsListView(ListAPIView):
         return response
 
 
+class SafeModuleTransactionView(GenericAPIView):
+    serializer_class = serializers.SafeModuleTransactionResponseSerializer
+    pagination_class = None  # Don't show limit/offset in swagger
+
+    @swagger_auto_schema(
+        responses={
+            200: serializer_class(),
+            404: "ModuleTransaction does not exist",
+            422: "Malformed module transaction id",
+        }
+    )
+    def get(self, request, module_transaction_id, *args, **kwargs):
+        """
+        Return module transaction filtered by module_transaction_id
+        """
+        if module_transaction_id and len(module_transaction_id) < 65:
+            return Response(
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                data={
+                    "code": 1,
+                    "message": "module_transaction_id is too short",
+                    "arguments": [module_transaction_id],
+                },
+            )
+        tx_hash = module_transaction_id[1:65]
+        trace_address = module_transaction_id[65:]
+        try:
+            module_transaction = ModuleTransaction.objects.get(
+                internal_tx__ethereum_tx_id=tx_hash,
+                internal_tx__trace_address=trace_address,
+            )
+            serializer = self.get_serializer(module_transaction)
+            return Response(status=status.HTTP_200_OK, data=serializer.data)
+        except ModuleTransaction.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+
 class SafeModuleTransactionListView(ListAPIView):
     filter_backends = (
         django_filters.rest_framework.DjangoFilterBackend,
@@ -822,6 +859,88 @@ class DelegateDeleteView(GenericAPIView):
             return Response(status=status.HTTP_404_NOT_FOUND)
 
 
+class TransferView(GenericAPIView):
+    serializer_class = serializers.TransferWithTokenInfoResponseSerializer
+    pagination_class = None
+
+    def get_erc20_erc721_transfer(self, transaction_hash: str, log_index: str):
+        """
+        Search ERCTransfer by transaction_hash and log_index event.
+
+        :param transaction_hash: ethereum transaction hash
+        :param log_index: event log index
+        :return: ERC20Transfer object
+        """
+        erc20_queryset = self.filter_queryset(
+            ERC20Transfer.objects.filter(
+                ethereum_tx=transaction_hash, log_index=log_index
+            ).token_txs()
+        )
+        erc721_queryset = self.filter_queryset(
+            ERC721Transfer.objects.filter(
+                ethereum_tx=transaction_hash, log_index=log_index
+            ).token_txs()
+        )
+        return ERC20Transfer.objects.token_transfer_values(
+            erc20_queryset, erc721_queryset
+        )
+
+    def get_ethereum_transfer(self, transaction_hash: str, trace_address: str):
+        """
+        Search an ethereum transfer by transaction hash and trace address
+
+        :param transaction_hash: ethereum transaction hash
+        :param trace_address: ethereum trace address
+        :return: InternalTx object
+        """
+        ether_queryset = self.filter_queryset(
+            InternalTx.objects.ether_txs().filter(
+                ethereum_tx=transaction_hash, trace_address=trace_address
+            )
+        )
+        return InternalTx.objects.ether_txs_values(ether_queryset)
+
+    def get_queryset(self, transfer_id):
+        # transfer_id is composed by transfer_type (ethereum transfer or token_transfer) + tx_hash + (log_index or trace_address)
+        transfer_type = transfer_id[0]
+        tx_hash = transfer_id[1:65]
+        log_or_trace = transfer_id[65:]
+        if transfer_type == "i":
+            # It is an ethereumTransfer
+            return self.get_ethereum_transfer(tx_hash, log_or_trace)
+        else:
+            # It is an tokenTransfer
+            return self.get_erc20_erc721_transfer(tx_hash, log_or_trace)
+
+    def add_tokens_to_transfer(self, transfer: TransferDict) -> TransferDict:
+        tokens = {
+            token.address: token
+            for token in Token.objects.filter(address__in={transfer["token_address"]})
+        }
+        transfer["token"] = tokens.get(transfer["token_address"])
+
+        return transfer
+
+    def get(self, request, transfer_id, *args, **kwargs):
+        """
+        Return a transfer filtered by transfer_id
+        """
+        if transfer_id and len(transfer_id) < 65:
+            return Response(
+                status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                data={
+                    "code": 1,
+                    "message": "module_transaction_id is too short",
+                    "arguments": [transfer_id],
+                },
+            )
+        transfer = self.get_queryset(transfer_id)
+        if len(transfer) == 0:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(self.add_tokens_to_transfer(transfer[0]))
+        return Response(status=status.HTTP_200_OK, data=serializer.data)
+
+
 class SafeTransferListView(ListAPIView):
     filter_backends = (django_filters.rest_framework.DjangoFilterBackend,)
     filterset_class = filters.TransferListFilter
@@ -863,8 +982,6 @@ class SafeTransferListView(ListAPIView):
 
     def list(self, request, *args, **kwargs):
         # Queryset must be already filtered, as we cannot filter a union
-        # queryset = self.filter_queryset(self.get_queryset())
-
         queryset = self.get_queryset()
         page = self.paginate_queryset(queryset)
         if page is not None:

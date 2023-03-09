@@ -10,6 +10,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from eth_account import Account
+from factory.fuzzy import FuzzyText
 from hexbytes import HexBytes
 from requests import ReadTimeout
 from rest_framework import status
@@ -34,6 +35,7 @@ from safe_transaction_service.tokens.tests.factories import TokenFactory
 from ..helpers import DelegateSignatureHelper
 from ..models import (
     IndexingStatus,
+    InternalTx,
     MultisigConfirmation,
     MultisigTransaction,
     SafeContractDelegate,
@@ -469,6 +471,50 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         response = self.client.get(url, format="json")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["count"], 1)
+
+    def test_get_module_transaction(self):
+        module_transaction_id = "wrong_module_transaction_id"
+        url = reverse("v1:history:module-transaction", args=(module_transaction_id,))
+        response = self.client.get(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        not_exist_hash = Web3.keccak(text="not_exist").hex()
+        module_transaction_id = self._get_module_transaction_id(not_exist_hash, "0")
+        url = reverse("v1:history:module-transaction", args=(module_transaction_id,))
+        response = self.client.get(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        safe_address = Account.create().address
+        module_transaction = ModuleTransactionFactory(safe=safe_address)
+        module_transaction_id = self._get_module_transaction_id(
+            module_transaction.internal_tx.ethereum_tx_id,
+            module_transaction.internal_tx.trace_address,
+        )
+        url = reverse("v1:history:module-transaction", args=(module_transaction_id,))
+        response = self.client.get(url, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.json(),
+            {
+                "created": module_transaction.created.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "executionDate": module_transaction.internal_tx.ethereum_tx.block.timestamp.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "blockNumber": module_transaction.internal_tx.ethereum_tx.block_id,
+                "isSuccessful": not module_transaction.failed,
+                "transactionHash": module_transaction.internal_tx.ethereum_tx_id,
+                "safe": safe_address,
+                "module": module_transaction.module,
+                "to": module_transaction.to,
+                "value": str(module_transaction.value),
+                "data": module_transaction.data.hex(),
+                "operation": module_transaction.operation,
+                "dataDecoded": None,
+                "moduleTransactionId": module_transaction_id,
+            },
+        )
 
     def test_get_multisig_confirmation(self):
         random_safe_tx_hash = Web3.keccak(text="enxebre").hex()
@@ -2212,6 +2258,17 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
         self.assertEqual(SafeContractDelegate.objects.count(), 0)
 
+    def _get_module_transaction_id(self, transaction_hash, trace_address):
+        return "i" + transaction_hash[2:] + trace_address
+
+    def _get_transfer_id(self, obj: InternalTx) -> str:
+        # Remove 0x from ethereum_tx_id
+        transaction_hash = obj.ethereum_tx_id[2:]
+        if hasattr(obj, "log_index"):
+            return "e" + transaction_hash + str(obj.log_index)
+        else:
+            return "i" + transaction_hash + obj.trace_address
+
     def test_incoming_transfers_view(self):
         safe_address = Account.create().address
         response = self.client.get(
@@ -2224,6 +2281,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         value = 2
         InternalTxFactory(to=safe_address, value=0)
         internal_tx = InternalTxFactory(to=safe_address, value=value)
+        transfer_id = self._get_transfer_id(internal_tx)
         InternalTxFactory(to=Account.create().address, value=value)
         response = self.client.get(
             reverse("v1:history:incoming-transfers", args=(safe_address,)),
@@ -2279,6 +2337,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "executionDate": ethereum_erc_20_event.ethereum_tx.block.timestamp.isoformat().replace(
                         "+00:00", "Z"
                     ),
+                    "transferId": self._get_transfer_id(ethereum_erc_20_event),
                     "transactionHash": ethereum_erc_20_event.ethereum_tx_id,
                     "blockNumber": ethereum_erc_20_event.ethereum_tx.block_id,
                     "to": safe_address,
@@ -2300,6 +2359,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "executionDate": internal_tx.ethereum_tx.block.timestamp.isoformat().replace(
                         "+00:00", "Z"
                     ),
+                    "transferId": self._get_transfer_id(internal_tx),
                     "transactionHash": internal_tx.ethereum_tx_id,
                     "blockNumber": internal_tx.ethereum_tx.block_id,
                     "to": safe_address,
@@ -2330,6 +2390,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "executionDate": ethereum_erc_721_event.ethereum_tx.block.timestamp.isoformat().replace(
                         "+00:00", "Z"
                     ),
+                    "transferId": self._get_transfer_id(ethereum_erc_721_event),
                     "transactionHash": ethereum_erc_721_event.ethereum_tx_id,
                     "blockNumber": ethereum_erc_721_event.ethereum_tx.block_id,
                     "to": safe_address,
@@ -2344,6 +2405,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "executionDate": ethereum_erc_20_event.ethereum_tx.block.timestamp.isoformat().replace(
                         "+00:00", "Z"
                     ),
+                    "transferId": self._get_transfer_id(ethereum_erc_20_event),
                     "transactionHash": ethereum_erc_20_event.ethereum_tx_id,
                     "blockNumber": ethereum_erc_20_event.ethereum_tx.block_id,
                     "to": safe_address,
@@ -2365,6 +2427,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "executionDate": internal_tx.ethereum_tx.block.timestamp.isoformat().replace(
                         "+00:00", "Z"
                     ),
+                    "transferId": self._get_transfer_id(internal_tx),
                     "transactionHash": internal_tx.ethereum_tx_id,
                     "blockNumber": internal_tx.ethereum_tx.block_id,
                     "to": safe_address,
@@ -2460,6 +2523,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "blockNumber": ethereum_erc_20_event_2.ethereum_tx.block_id,
+                "transferId": self._get_transfer_id(ethereum_erc_20_event_2),
                 "transactionHash": ethereum_erc_20_event_2.ethereum_tx_id,
                 "to": ethereum_erc_20_event_2.to,
                 "value": str(token_value),
@@ -2474,6 +2538,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "blockNumber": ethereum_erc_20_event.ethereum_tx.block_id,
+                "transferId": self._get_transfer_id(ethereum_erc_20_event),
                 "transactionHash": ethereum_erc_20_event.ethereum_tx_id,
                 "to": safe_address,
                 "value": str(token_value),
@@ -2495,6 +2560,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "blockNumber": internal_tx_2.ethereum_tx.block_id,
+                "transferId": self._get_transfer_id(internal_tx_2),
                 "transactionHash": internal_tx_2.ethereum_tx_id,
                 "to": internal_tx_2.to,
                 "value": str(value),
@@ -2509,6 +2575,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "blockNumber": internal_tx.ethereum_tx.block_id,
+                "transferId": self._get_transfer_id(internal_tx),
                 "transactionHash": internal_tx.ethereum_tx_id,
                 "to": safe_address,
                 "value": str(value),
@@ -2539,6 +2606,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "transactionHash": ethereum_erc_721_event_2.ethereum_tx_id,
+                "transferId": self._get_transfer_id(ethereum_erc_721_event_2),
                 "blockNumber": ethereum_erc_721_event_2.ethereum_tx.block_id,
                 "to": ethereum_erc_721_event_2.to,
                 "value": None,
@@ -2553,6 +2621,7 @@ class TestViews(SafeTestCaseMixin, APITestCase):
                     "+00:00", "Z"
                 ),
                 "transactionHash": ethereum_erc_721_event.ethereum_tx_id,
+                "transferId": self._get_transfer_id(ethereum_erc_721_event),
                 "blockNumber": ethereum_erc_721_event.ethereum_tx.block_id,
                 "to": safe_address,
                 "value": None,
@@ -2612,6 +2681,111 @@ class TestViews(SafeTestCaseMixin, APITestCase):
         self.assertGreater(len(response.data["results"]), 0)
         for result in response.data["results"]:
             self.assertNotEqual(result["type"], TransferType.ETHER_TRANSFER.name)
+
+    def test_get_transfer_view(self):
+        transfer_id = FuzzyText(length=6).fuzz()
+        response = self.client.get(
+            reverse("v1:history:transfer", args=(transfer_id,)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        safe_address = Account.create().address
+        internal_tx = InternalTxFactory(to=safe_address)
+        # Test 404
+        wrong_transfer_id = (
+            self._get_transfer_id(internal_tx) + FuzzyText(length=2).fuzz()
+        )
+        response = self.client.get(
+            reverse("v1:history:transfer", args=(wrong_transfer_id,)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # Test getting ether incomming transfer
+        transfer_id = self._get_transfer_id(internal_tx)
+        response = self.client.get(
+            reverse("v1:history:transfer", args=(transfer_id,)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_result = {
+            "type": TransferType.ETHER_TRANSFER.name,
+            "executionDate": internal_tx.ethereum_tx.block.timestamp.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "blockNumber": internal_tx.ethereum_tx.block_id,
+            "transferId": transfer_id,
+            "transactionHash": internal_tx.ethereum_tx_id,
+            "to": safe_address,
+            "value": str(internal_tx.value),
+            "tokenId": None,
+            "tokenAddress": None,
+            "from": internal_tx._from,
+            "tokenInfo": None,
+        }
+        self.assertEqual(response.json(), expected_result)
+
+        # Test filtering ERC20 transfer by transfer_id
+        ethereum_erc_20_event = ERC20TransferFactory(to=safe_address)
+        token = TokenFactory(address=ethereum_erc_20_event.address)
+        transfer_id = self._get_transfer_id(ethereum_erc_20_event)
+        response = self.client.get(
+            reverse("v1:history:transfer", args=(transfer_id,)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_result = {
+            "type": TransferType.ERC20_TRANSFER.name,
+            "executionDate": ethereum_erc_20_event.ethereum_tx.block.timestamp.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "blockNumber": ethereum_erc_20_event.ethereum_tx.block_id,
+            "transferId": transfer_id,
+            "transactionHash": ethereum_erc_20_event.ethereum_tx_id,
+            "to": safe_address,
+            "value": str(ethereum_erc_20_event.value),
+            "tokenId": None,
+            "tokenAddress": ethereum_erc_20_event.address,
+            "from": ethereum_erc_20_event._from,
+            "tokenInfo": {
+                "type": "ERC20",
+                "address": token.address,
+                "name": token.name,
+                "symbol": token.symbol,
+                "decimals": token.decimals,
+                "logoUri": token.get_full_logo_uri(),
+            },
+        }
+        self.assertEqual(response.json(), expected_result)
+
+        # Test filtering ERC721 transfer by transfer_id
+        token_id = 17
+        ethereum_erc_721_event = ERC721TransferFactory(
+            to=safe_address, token_id=token_id
+        )
+        transfer_id = self._get_transfer_id(ethereum_erc_721_event)
+        response = self.client.get(
+            reverse("v1:history:transfer", args=(transfer_id,)),
+            format="json",
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        expected_result = {
+            "type": TransferType.ERC721_TRANSFER.name,
+            "executionDate": ethereum_erc_721_event.ethereum_tx.block.timestamp.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "transactionHash": ethereum_erc_721_event.ethereum_tx_id,
+            "transferId": transfer_id,
+            "blockNumber": ethereum_erc_721_event.ethereum_tx.block_id,
+            "to": safe_address,
+            "value": None,
+            "tokenId": str(token_id),
+            "tokenAddress": ethereum_erc_721_event.address,
+            "from": ethereum_erc_721_event._from,
+            "tokenInfo": None,
+        }
+        self.assertEqual(response.json(), expected_result)
 
     def test_safe_creation_view(self):
         invalid_address = "0x2A"
